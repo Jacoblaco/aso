@@ -1,0 +1,1 @@
+﻿write-host "Hola $env:USERNAME, tu directorio de trabajo es $env:HOMEPATH , tu nombre de dominio es $env:userdomain y tu equipo se llama $env:computername"

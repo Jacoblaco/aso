@@ -1,0 +1,151 @@
+<#
+    
+    Script que automatiza la creación de una estructura de carpetas por departamento,
+    asigna permisos NTFS diferenciados y comparte el recurso en red.
+    
+    Política de seguridad implementada:
+    - Administradores: Control total en todas las carpetas
+    - Grupo del departamento: Modificar en su propia carpeta
+    - Usuarios del dominio: Solo lectura en todas las carpetas
+
+#>
+
+# Importar módulo de Active Directory
+Import-Module ActiveDirectory
+
+# ============================================
+# CONFIGURACIÓN INICIAL
+# ============================================
+$csvPath = "C:\UT7\departamentos.csv"
+$basePath = "C:\Empresa"
+
+Write-Host "`n========================================" -ForegroundColor Cyan
+Write-Host "  PRÁCTICA 2 - RECURSOS COMPARTIDOS" -ForegroundColor Cyan
+Write-Host "========================================`n" -ForegroundColor Cyan
+
+# ============================================
+# PASO 1: CREAR ESTRUCTURA DE CARPETAS
+# ============================================
+Write-Host "[1/4] Creando estructura de carpetas..." -ForegroundColor Yellow
+
+# Crear carpeta principal
+if (-not (Test-Path $basePath)) {
+    New-Item -Path $basePath -ItemType Directory | Out-Null
+    Write-Host "  ✓ Carpeta principal creada: $basePath" -ForegroundColor Green
+} else {
+    Write-Host "  ✓ Carpeta principal ya existe: $basePath" -ForegroundColor Gray
+}
+
+# Leer departamentos del CSV
+$departamentos = Import-Csv -Path $csvPath -Delimiter ';'
+
+# Crear carpeta por cada departamento
+foreach ($d in $departamentos) {
+    $dep = $d.departamento.Trim().ToUpper()
+    $ruta = "$basePath\$dep"
+    
+    if (-not (Test-Path $ruta -ErrorAction SilentlyContinue)) {
+        New-Item -Path $ruta -ItemType Directory -ErrorAction SilentlyContinue | Out-Null
+        Write-Host "  ✓ Carpeta creada: $dep" -ForegroundColor Green
+    } else {
+        Write-Host "  ✓ Carpeta ya existe: $dep" -ForegroundColor Gray
+    }
+}
+
+# ============================================
+# PASO 2: CONFIGURAR PERMISOS NTFS EN C:\EMPRESA
+# ============================================
+Write-Host "`n[2/4] Configurando permisos NTFS en $basePath..." -ForegroundColor Yellow
+
+# Tomar propiedad de la carpeta
+takeown /f $basePath /r /d s | Out-Null
+
+# Resetear permisos
+icacls $basePath /reset /t | Out-Null
+
+# Aplicar permisos base usando icacls
+icacls $basePath /grant "BUILTIN\Administradores:(OI)(CI)F" /t | Out-Null
+icacls $basePath /grant "EMPRESA\Usuarios del dominio:(OI)(CI)RX" /t | Out-Null
+
+Write-Host "  ✓ Permisos base configurados en $basePath" -ForegroundColor Green
+
+# ============================================
+# PASO 3: CONFIGURAR PERMISOS NTFS POR DEPARTAMENTO
+# ============================================
+Write-Host "`n[3/4] Configurando permisos por departamento..." -ForegroundColor Yellow
+
+foreach ($d in $departamentos) {
+    $dep = $d.departamento.Trim().ToUpper()
+    $ruta = "$basePath\$dep"
+    
+    # Verificar que existe el grupo en Active Directory
+    $grupo = Get-ADGroup -Filter "SamAccountName -eq '$dep'" -ErrorAction SilentlyContinue
+    
+    if (-not $grupo) {
+        Write-Warning "  ✗ No se encontró el grupo '$dep' en Active Directory. Saltando..."
+        continue
+    }
+    
+    # Tomar propiedad
+    takeown /f $ruta /r /d s | Out-Null
+    
+    # Resetear permisos heredados
+    icacls $ruta /reset /t | Out-Null
+    
+    # Aplicar permisos específicos:
+    # - Administradores: Control Total (F)
+    # - Grupo del departamento: Modificar (M)
+    # - Usuarios del dominio: Lectura y Ejecución (RX)
+    icacls $ruta /grant "BUILTIN\Administradores:(OI)(CI)F" /t | Out-Null
+    icacls $ruta /grant "EMPRESA\$dep:(OI)(CI)M" /t | Out-Null
+    icacls $ruta /grant "EMPRESA\Usuarios del dominio:(OI)(CI)RX" /t | Out-Null
+    
+    Write-Host "  ✓ Permisos configurados para: $dep (Grupo: $($grupo.Name))" -ForegroundColor Green
+}
+
+# ============================================
+# PASO 4: COMPARTIR RECURSO EN RED
+# ============================================
+Write-Host "`n[4/4] Configurando recurso compartido en red..." -ForegroundColor Yellow
+
+# Eliminar recurso compartido si ya existe
+$shareExistente = Get-SmbShare -Name "Empresa" -ErrorAction SilentlyContinue
+if ($shareExistente) {
+    Remove-SmbShare -Name "Empresa" -Force -ErrorAction SilentlyContinue
+    Write-Host "  → Recurso compartido anterior eliminado" -ForegroundColor Gray
+}
+
+# Crear recurso compartido
+New-SmbShare -Name "Empresa" -Path $basePath -ErrorAction SilentlyContinue | Out-Null
+
+# Configurar permisos de compartición (Share Permissions)
+# IMPORTANTE: Estos permisos son la "puerta de red", NTFS controla la seguridad real
+Grant-SmbShareAccess -Name "Empresa" -AccountName "BUILTIN\Administradores" -AccessRight Full -Force | Out-Null
+Grant-SmbShareAccess -Name "Empresa" -AccountName "EMPRESA\Usuarios del dominio" -AccessRight Change -Force | Out-Null
+
+Write-Host "  ✓ Recurso compartido creado: \\$env:COMPUTERNAME\Empresa" -ForegroundColor Green
+
+# ============================================
+# RESUMEN FINAL
+# ============================================
+Write-Host "`n========================================" -ForegroundColor Cyan
+Write-Host "  ✅ PRÁCTICA COMPLETADA CORRECTAMENTE" -ForegroundColor Green
+Write-Host "========================================`n" -ForegroundColor Cyan
+
+Write-Host "📁 Estructura creada:" -ForegroundColor Cyan
+Write-Host "   C:\Empresa\" -ForegroundColor White
+foreach ($d in $departamentos) {
+    $dep = $d.departamento.Trim().ToUpper()
+    Write-Host "   ├── $dep\" -ForegroundColor White
+}
+
+Write-Host "`n🌐 Acceso de red:" -ForegroundColor Cyan
+Write-Host "   \\$env:COMPUTERNAME\Empresa" -ForegroundColor White
+Write-Host "   \\$(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.*'} | Select-Object -First 1 -ExpandProperty IPAddress)\Empresa" -ForegroundColor White
+
+Write-Host "`n🔒 Política de seguridad aplicada:" -ForegroundColor Cyan
+Write-Host "   • Administradores: Control total" -ForegroundColor White
+Write-Host "   • Grupo del departamento: Modificar (solo en su carpeta)" -ForegroundColor White
+Write-Host "   • Usuarios del dominio: Solo lectura" -ForegroundColor White
+
+Write-Host "`n========================================`n" -ForegroundColor Cyan
